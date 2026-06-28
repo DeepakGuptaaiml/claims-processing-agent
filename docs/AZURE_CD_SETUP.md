@@ -38,24 +38,30 @@ No Azure Search or HF secrets needed on this repo.
 
 ## One-time bootstrap
 
-CD **updates** an existing Container App; it does not create one. Run once:
+CD **updates** existing Container Apps; it does not create them.
+
+**1. Agent API**
 
 ```bash
-cd claims-processing-agent
-chmod +x scripts/deploy-azure-api.sh
+chmod +x scripts/deploy-azure-api.sh scripts/deploy-azure-ui.sh
 
-# After first CI push builds the image:
 IMAGE=ghcr.io/deepakguptaaiml/claims-processing-agent:latest \
   ./scripts/deploy-azure-api.sh
 ```
 
-Or with private GHCR:
+**2. Examiner UI** (after API is healthy)
 
 ```bash
-export GHCR_TOKEN=<pat>
-export GHCR_USER=DeepakGuptaaiml
-./scripts/deploy-azure-api.sh
+IMAGE=ghcr.io/deepakguptaaiml/claims-processing-agent-streamlit:latest \
+  ./scripts/deploy-azure-ui.sh
 ```
+
+Make both GHCR packages **public** (or set `GHCR_TOKEN`):
+
+| Package | Name |
+|---------|------|
+| API | `claims-processing-agent` |
+| UI | `claims-processing-agent-streamlit` |
 
 ---
 

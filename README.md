@@ -46,17 +46,36 @@ curl -X POST http://127.0.0.1:8002/agent/process \
 
 ## Deploy to Azure
 
-**One-time bootstrap** (after first CI build):
+**API bootstrap** (once):
 
 ```bash
-chmod +x scripts/deploy-azure-api.sh
+chmod +x scripts/deploy-azure-api.sh scripts/deploy-azure-ui.sh
 IMAGE=ghcr.io/deepakguptaaiml/claims-processing-agent:latest \
   ./scripts/deploy-azure-api.sh
 ```
 
-**Ongoing:** push to `main` → CI builds GHCR image → CD updates `claims-processing-agent-api`.
+**Examiner UI bootstrap** (once, after API is healthy):
+
+```bash
+IMAGE=ghcr.io/deepakguptaaiml/claims-processing-agent-streamlit:latest \
+  ./scripts/deploy-azure-ui.sh
+```
+
+**Ongoing:** push to `main` → CI builds API + Streamlit images → CD updates both apps.
+
+| App | Azure name | Port |
+|-----|------------|------|
+| Agent API | `claims-processing-agent-api` | 8002 |
+| Examiner UI | `claims-processing-agent-ui` | 8501 |
 
 Add GitHub secrets: `AZURE_CREDENTIALS` (reuse from other repos).
+
+## Examiner UI (local)
+
+```bash
+pip install -r requirements-streamlit.txt
+API_URL=http://127.0.0.1:8002 streamlit run streamlit_app.py
+```
 
 ## Config
 

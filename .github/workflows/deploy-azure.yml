@@ -1,5 +1,7 @@
-# Continuous deployment: update Azure Container App after CI succeeds on main.
-# One-time bootstrap: scripts/deploy-azure-api.sh (create claims-processing-agent-api).
+# Continuous deployment: update Azure Container Apps after CI succeeds on main.
+# One-time bootstrap:
+#   scripts/deploy-azure-api.sh  → claims-processing-agent-api
+#   scripts/deploy-azure-ui.sh   → claims-processing-agent-ui
 
 name: Deploy to Azure
 
@@ -14,6 +16,7 @@ env:
   REGISTRY: ghcr.io
   RESOURCE_GROUP: rg-claims-intelligence
   API_APP_NAME: claims-processing-agent-api
+  UI_APP_NAME: claims-processing-agent-ui
   MEDICARE_APP_NAME: medicare-classifier-api
   RESERVE_APP_NAME: claims-reserve-api
 
@@ -47,33 +50,38 @@ jobs:
           echo "COMMIT_SHA=${FULL_SHA}" >> "$GITHUB_ENV"
           echo "REVISION_SUFFIX=r${SHORT_SHA}" >> "$GITHUB_ENV"
           echo "API_IMAGE=${{ env.REGISTRY }}/${REPO}:${SHORT_SHA}" >> "$GITHUB_ENV"
+          echo "UI_IMAGE=${{ env.REGISTRY }}/${REPO}-streamlit:${SHORT_SHA}" >> "$GITHUB_ENV"
 
-      - name: Verify image exists in GHCR
+      - name: Verify images exist in GHCR
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Inspect GHCR manifest before deploy
-        run: docker manifest inspect "$API_IMAGE"
+      - name: Inspect GHCR manifests before deploy
+        run: |
+          docker manifest inspect "$API_IMAGE"
+          docker manifest inspect "$UI_IMAGE"
 
-      - name: Configure GHCR pull on Container App
+      - name: Configure GHCR pull on Container Apps
         env:
           GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
           GHCR_USER: ${{ secrets.GHCR_USER }}
         run: |
           if [ -n "$GHCR_TOKEN" ]; then
             USER="${GHCR_USER:-DeepakGuptaaiml}"
-            echo "Setting GHCR registry credentials on ${{ env.API_APP_NAME }}"
-            az containerapp registry set \
-              --name "${{ env.API_APP_NAME }}" \
-              --resource-group "${{ env.RESOURCE_GROUP }}" \
-              --server ghcr.io \
-              --username "$USER" \
-              --password "$GHCR_TOKEN"
+            for APP in "${{ env.API_APP_NAME }}" "${{ env.UI_APP_NAME }}"; do
+              echo "Setting GHCR registry credentials on $APP"
+              az containerapp registry set \
+                --name "$APP" \
+                --resource-group "${{ env.RESOURCE_GROUP }}" \
+                --server ghcr.io \
+                --username "$USER" \
+                --password "$GHCR_TOKEN"
+            done
           else
-            echo "GHCR_TOKEN not set — assuming public GHCR package"
+            echo "GHCR_TOKEN not set — assuming public GHCR packages"
           fi
 
       - name: Resolve downstream API URLs
@@ -86,12 +94,15 @@ jobs:
             --name "${{ env.RESERVE_APP_NAME }}" \
             --resource-group "${{ env.RESOURCE_GROUP }}" \
             --query "properties.configuration.ingress.fqdn" -o tsv)
+          AGENT_FQDN=$(az containerapp show \
+            --name "${{ env.API_APP_NAME }}" \
+            --resource-group "${{ env.RESOURCE_GROUP }}" \
+            --query "properties.configuration.ingress.fqdn" -o tsv)
           echo "MEDICARE_API_URL=https://${MEDICARE_FQDN}" >> "$GITHUB_ENV"
           echo "RESERVE_API_URL=https://${RESERVE_FQDN}" >> "$GITHUB_ENV"
-          echo "Medicare API: https://${MEDICARE_FQDN}"
-          echo "Reserve API:  https://${RESERVE_FQDN}"
+          echo "AGENT_API_URL=https://${AGENT_FQDN}" >> "$GITHUB_ENV"
 
-      - name: Deploy Agent Container App
+      - name: Deploy Agent API Container App
         run: |
           az containerapp update \
             --name "${{ env.API_APP_NAME }}" \
@@ -103,6 +114,21 @@ jobs:
               RESERVE_API_URL="$RESERVE_API_URL" \
               STORE_BACKEND=sqlite \
               SQLITE_DB_PATH=/app/mcp_server/data/claims_ai.db
+
+      - name: Deploy Streamlit UI Container App
+        run: |
+          if az containerapp show \
+            --name "${{ env.UI_APP_NAME }}" \
+            --resource-group "${{ env.RESOURCE_GROUP }}" &>/dev/null; then
+            az containerapp update \
+              --name "${{ env.UI_APP_NAME }}" \
+              --resource-group "${{ env.RESOURCE_GROUP }}" \
+              --image "$UI_IMAGE" \
+              --revision-suffix "$REVISION_SUFFIX" \
+              --set-env-vars API_URL="$AGENT_API_URL"
+          else
+            echo "UI app not found — skip (run scripts/deploy-azure-ui.sh once)"
+          fi
 
       - name: Verify API health
         run: |
@@ -126,24 +152,23 @@ jobs:
           done
 
           if [ "$ok" != "true" ]; then
-            echo "Health check failed — latest revision status:"
-            az containerapp revision list \
-              --name "${{ env.API_APP_NAME }}" \
-              --resource-group "${{ env.RESOURCE_GROUP }}" \
-              --query "[?properties.active].{name:name, traffic:properties.trafficWeight, health:properties.healthState, replicas:properties.replicas}" \
-              -o table || true
+            echo "Health check failed"
             exit 1
           fi
 
       - name: Deployment summary
         run: |
-          FQDN=$(az containerapp show \
+          API_FQDN=$(az containerapp show \
             --name "${{ env.API_APP_NAME }}" \
             --resource-group "${{ env.RESOURCE_GROUP }}" \
             --query "properties.configuration.ingress.fqdn" -o tsv)
+          UI_FQDN=$(az containerapp show \
+            --name "${{ env.UI_APP_NAME }}" \
+            --resource-group "${{ env.RESOURCE_GROUP }}" \
+            --query "properties.configuration.ingress.fqdn" -o tsv 2>/dev/null || echo "not deployed")
           echo "## Deployed to Azure" >> "$GITHUB_STEP_SUMMARY"
           echo "- **Commit:** \`${COMMIT_SHA}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Image:** \`$API_IMAGE\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Agent URL:** https://${FQDN}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Medicare API:** ${MEDICARE_API_URL}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Reserve API:** ${RESERVE_API_URL}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **API image:** \`$API_IMAGE\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **UI image:** \`$UI_IMAGE\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Agent API:** https://${API_FQDN}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Examiner UI:** https://${UI_FQDN}" >> "$GITHUB_STEP_SUMMARY"

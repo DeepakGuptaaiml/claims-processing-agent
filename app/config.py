@@ -35,3 +35,20 @@ def get_oracle_config() -> dict[str, str]:
         "user": os.getenv("ORACLE_USER", ""),
         "password": os.getenv("ORACLE_PASSWORD", ""),
     }
+
+
+def _timeout_seconds(env_key: str, default: float) -> float:
+    raw = os.getenv(env_key, "").strip()
+    if not raw:
+        return default
+    return float(raw)
+
+
+def get_http_timeouts() -> dict[str, float]:
+    """HTTP client timeouts — reserve needs extra headroom for Container App cold starts."""
+    return {
+        "medicare": _timeout_seconds("HTTP_TIMEOUT_MEDICARE", 60.0),
+        "reserve": _timeout_seconds("HTTP_TIMEOUT_RESERVE", 90.0),
+        "policy": _timeout_seconds("HTTP_TIMEOUT_POLICY", 90.0),
+    }
+
