@@ -2,11 +2,7 @@
 
 from __future__ import annotations
 
-import subprocess
-import sys
 from pathlib import Path
-
-import pytest
 
 from agent.tools.payloads import medicare_payload_from_summary, reserve_payload_from_context
 from mcp_server.stores.factory import get_claim_store, reset_claim_store
@@ -16,16 +12,11 @@ ROOT = Path(__file__).resolve().parents[1]
 DB_PATH = ROOT / "mcp_server" / "data" / "claims_ai.db"
 
 
-@pytest.fixture(scope="module", autouse=True)
-def seed_db():
-    if not DB_PATH.exists():
-        subprocess.run(
-            [sys.executable, str(ROOT / "mcp_server" / "seed" / "seed_from_csv.py")],
-            check=True,
-            cwd=str(ROOT),
-        )
+def setup_function():
     reset_claim_store()
-    yield
+
+
+def teardown_function():
     reset_claim_store()
 
 
