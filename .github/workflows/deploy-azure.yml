@@ -1,0 +1,149 @@
+# Continuous deployment: update Azure Container App after CI succeeds on main.
+# One-time bootstrap: scripts/deploy-azure-api.sh (create claims-processing-agent-api).
+
+name: Deploy to Azure
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types:
+      - completed
+    branches: [main, master]
+
+env:
+  REGISTRY: ghcr.io
+  RESOURCE_GROUP: rg-claims-intelligence
+  API_APP_NAME: claims-processing-agent-api
+  MEDICARE_APP_NAME: medicare-classifier-api
+  RESERVE_APP_NAME: claims-reserve-api
+
+jobs:
+  deploy:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      (github.event.workflow_run.head_branch == 'main' ||
+       github.event.workflow_run.head_branch == 'master')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Log in to Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Set image names and tag
+        run: |
+          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          FULL_SHA="${{ github.event.workflow_run.head_sha }}"
+          SHORT_SHA="${FULL_SHA:0:7}"
+          echo "IMAGE_TAG=${SHORT_SHA}" >> "$GITHUB_ENV"
+          echo "COMMIT_SHA=${FULL_SHA}" >> "$GITHUB_ENV"
+          echo "REVISION_SUFFIX=r${SHORT_SHA}" >> "$GITHUB_ENV"
+          echo "API_IMAGE=${{ env.REGISTRY }}/${REPO}:${SHORT_SHA}" >> "$GITHUB_ENV"
+
+      - name: Verify image exists in GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Inspect GHCR manifest before deploy
+        run: docker manifest inspect "$API_IMAGE"
+
+      - name: Configure GHCR pull on Container App
+        env:
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          GHCR_USER: ${{ secrets.GHCR_USER }}
+        run: |
+          if [ -n "$GHCR_TOKEN" ]; then
+            USER="${GHCR_USER:-DeepakGuptaaiml}"
+            echo "Setting GHCR registry credentials on ${{ env.API_APP_NAME }}"
+            az containerapp registry set \
+              --name "${{ env.API_APP_NAME }}" \
+              --resource-group "${{ env.RESOURCE_GROUP }}" \
+              --server ghcr.io \
+              --username "$USER" \
+              --password "$GHCR_TOKEN"
+          else
+            echo "GHCR_TOKEN not set — assuming public GHCR package"
+          fi
+
+      - name: Resolve downstream API URLs
+        run: |
+          MEDICARE_FQDN=$(az containerapp show \
+            --name "${{ env.MEDICARE_APP_NAME }}" \
+            --resource-group "${{ env.RESOURCE_GROUP }}" \
+            --query "properties.configuration.ingress.fqdn" -o tsv)
+          RESERVE_FQDN=$(az containerapp show \
+            --name "${{ env.RESERVE_APP_NAME }}" \
+            --resource-group "${{ env.RESOURCE_GROUP }}" \
+            --query "properties.configuration.ingress.fqdn" -o tsv)
+          echo "MEDICARE_API_URL=https://${MEDICARE_FQDN}" >> "$GITHUB_ENV"
+          echo "RESERVE_API_URL=https://${RESERVE_FQDN}" >> "$GITHUB_ENV"
+          echo "Medicare API: https://${MEDICARE_FQDN}"
+          echo "Reserve API:  https://${RESERVE_FQDN}"
+
+      - name: Deploy Agent Container App
+        run: |
+          az containerapp update \
+            --name "${{ env.API_APP_NAME }}" \
+            --resource-group "${{ env.RESOURCE_GROUP }}" \
+            --image "$API_IMAGE" \
+            --revision-suffix "$REVISION_SUFFIX" \
+            --set-env-vars \
+              MEDICARE_API_URL="$MEDICARE_API_URL" \
+              RESERVE_API_URL="$RESERVE_API_URL" \
+              STORE_BACKEND=sqlite \
+              SQLITE_DB_PATH=/app/mcp_server/data/claims_ai.db
+
+      - name: Verify API health
+        run: |
+          FQDN=$(az containerapp show \
+            --name "${{ env.API_APP_NAME }}" \
+            --resource-group "${{ env.RESOURCE_GROUP }}" \
+            --query "properties.configuration.ingress.fqdn" -o tsv)
+          echo "Agent API URL: https://${FQDN}"
+
+          ok=false
+          for i in $(seq 1 18); do
+            code=$(curl -s -o /tmp/health.json -w "%{http_code}" "https://${FQDN}/health" || echo "000")
+            echo "Attempt ${i}/18: GET /health → HTTP ${code}"
+            if [ "$code" = "200" ]; then
+              cat /tmp/health.json
+              echo ""
+              ok=true
+              break
+            fi
+            sleep 10
+          done
+
+          if [ "$ok" != "true" ]; then
+            echo "Health check failed — latest revision status:"
+            az containerapp revision list \
+              --name "${{ env.API_APP_NAME }}" \
+              --resource-group "${{ env.RESOURCE_GROUP }}" \
+              --query "[?properties.active].{name:name, traffic:properties.trafficWeight, health:properties.healthState, replicas:properties.replicas}" \
+              -o table || true
+            exit 1
+          fi
+
+      - name: Deployment summary
+        run: |
+          FQDN=$(az containerapp show \
+            --name "${{ env.API_APP_NAME }}" \
+            --resource-group "${{ env.RESOURCE_GROUP }}" \
+            --query "properties.configuration.ingress.fqdn" -o tsv)
+          echo "## Deployed to Azure" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Commit:** \`${COMMIT_SHA}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Image:** \`$API_IMAGE\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Agent URL:** https://${FQDN}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Medicare API:** ${MEDICARE_API_URL}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Reserve API:** ${RESERVE_API_URL}" >> "$GITHUB_STEP_SUMMARY"

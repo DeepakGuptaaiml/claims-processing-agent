@@ -16,6 +16,9 @@ def get_claims_csv_path() -> Path:
     env = os.getenv("CLAIMS_CSV_PATH")
     if env:
         return Path(env)
+    bundled = ROOT / "data" / "claims_data.csv"
+    if bundled.exists():
+        return bundled
     return ROOT.parent / "medicare_classifier" / "data" / "claims_data.csv"
 
 
